@@ -9,8 +9,6 @@ app.use(cors());
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
-// ── Twilio credentials from environment variables ONLY ──────
-// Set these in Render → Environment tab. Never hardcode.
 const ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
 const API_KEY     = process.env.TWILIO_API_KEY;
 const API_SECRET  = process.env.TWILIO_API_SECRET;
@@ -22,7 +20,6 @@ if (!ACCOUNT_SID || !API_KEY || !API_SECRET) {
 const AccessToken = twilio.jwt.AccessToken;
 const VoiceGrant  = AccessToken.VoiceGrant;
 
-// ── MongoDB ──────────────────────────────────────────────────
 const MONGO_URI = process.env.MONGO_URI || '';
 let dbConnected = false;
 
@@ -32,7 +29,6 @@ if (MONGO_URI) {
     .catch(e  => console.error('❌ MongoDB error:', e.message));
 }
 
-// ── Agent Schema ─────────────────────────────────────────────
 const agentSchema = new mongoose.Schema({
   name:         { type: String, required: true },
   username:     { type: String, required: true, unique: true, lowercase: true, trim: true },
@@ -46,7 +42,6 @@ const agentSchema = new mongoose.Schema({
 });
 const Agent = mongoose.models.Agent || mongoose.model('Agent', agentSchema);
 
-// ── Fallback agents (always available, no DB needed) ─────────
 const FALLBACK_AGENTS = [
   {
     _id: 'marcus_fb',
@@ -72,7 +67,6 @@ const FALLBACK_AGENTS = [
   },
 ];
 
-// ── Helper: find agent by identity ───────────────────────────
 async function agentByIdentity(identity) {
   if (dbConnected) {
     return await Agent.findOne({ identity, active: true }).lean();
@@ -80,7 +74,6 @@ async function agentByIdentity(identity) {
   return FALLBACK_AGENTS.find(a => a.identity === identity && a.active) || null;
 }
 
-// ── Helper: find agent by phone number ───────────────────────
 async function agentByNumber(rawNumber) {
   const clean = rawNumber.replace(/\D/g, '');
   if (dbConnected) {
@@ -90,7 +83,6 @@ async function agentByNumber(rawNumber) {
   return FALLBACK_AGENTS.find(a => a.number.replace(/\D/g,'') === clean && a.active) || null;
 }
 
-// ── Helper: auth check ────────────────────────────────────────
 async function findAgent(username, pin) {
   const u = (username || '').toLowerCase().trim();
   const p = String(pin || '').trim();
@@ -103,7 +95,6 @@ async function findAgent(username, pin) {
   return FALLBACK_AGENTS.find(a => a.username === u && String(a.pin) === p && a.active) || null;
 }
 
-// ── Helper: all agents ────────────────────────────────────────
 async function getAllAgents() {
   if (dbConnected) {
     const agents = await Agent.find({}).sort({ created: -1 }).lean();
@@ -112,7 +103,6 @@ async function getAllAgents() {
   return FALLBACK_AGENTS.map(a => ({ ...a, pin: '••••' }));
 }
 
-// ── Admin auth middleware ─────────────────────────────────────
 const ADMIN_SECRET = process.env.ADMIN_SECRET || 'agentsedge2025';
 function requireAdmin(req, res, next) {
   const s = req.headers['x-admin-secret'] || req.query.secret;
@@ -120,14 +110,8 @@ function requireAdmin(req, res, next) {
   next();
 }
 
-// ══════════════════════════════════════════════════════════════
-// ROUTES
-// ══════════════════════════════════════════════════════════════
-
-// ── Health check ──────────────────────────────────────────────
 app.get('/health', (req, res) => res.status(200).json({ status: 'ok', timestamp: new Date() }));
 
-// ── Root ──────────────────────────────────────────────────────
 app.get('/', (req, res) => res.json({
   status:  'ok',
   service: 'Evertrust Dialer Backend',
@@ -135,19 +119,15 @@ app.get('/', (req, res) => res.json({
   version: '3.0.0',
 }));
 
-// ── Token endpoint ────────────────────────────────────────────
 app.get('/token', async (req, res) => {
   const identity = (req.query.identity || '').trim();
-
   if (!identity) {
     return res.status(400).json({ error: 'identity parameter required' });
   }
-
   const agent = await agentByIdentity(identity);
   if (!agent) {
     return res.status(403).json({ error: 'Unknown agent: ' + identity });
   }
-
   try {
     const token = new AccessToken(ACCOUNT_SID, API_KEY, API_SECRET, {
       identity,
@@ -165,7 +145,6 @@ app.get('/token', async (req, res) => {
   }
 });
 
-// ── Agent auth (login) ────────────────────────────────────────
 app.post('/auth', async (req, res) => {
   const { username, pin } = req.body;
   if (!username || !pin) return res.status(400).json({ error: 'username and pin required' });
@@ -190,7 +169,6 @@ app.post('/auth', async (req, res) => {
   }
 });
 
-// ── Get all agents (admin) ────────────────────────────────────
 app.get('/agents', requireAdmin, async (req, res) => {
   try {
     res.json({ agents: await getAllAgents() });
@@ -199,7 +177,6 @@ app.get('/agents', requireAdmin, async (req, res) => {
   }
 });
 
-// ── Create agent (admin) ──────────────────────────────────────
 app.post('/agents', requireAdmin, async (req, res) => {
   const { name, username, pin, number, identity, token_server, twiml_app } = req.body;
   if (!name || !username || !pin) return res.status(400).json({ error: 'name, username, pin required' });
@@ -229,7 +206,6 @@ app.post('/agents', requireAdmin, async (req, res) => {
   }
 });
 
-// ── Update agent (admin) ──────────────────────────────────────
 app.put('/agents/:username', requireAdmin, async (req, res) => {
   const updates = { ...req.body };
   delete updates.pin;
@@ -251,7 +227,6 @@ app.put('/agents/:username', requireAdmin, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// ── Toggle active/suspend (admin) ─────────────────────────────
 app.patch('/agents/:username/toggle', requireAdmin, async (req, res) => {
   try {
     if (dbConnected) {
@@ -269,7 +244,6 @@ app.patch('/agents/:username/toggle', requireAdmin, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// ── Delete agent (admin) ──────────────────────────────────────
 app.delete('/agents/:username', requireAdmin, async (req, res) => {
   try {
     if (dbConnected) {
@@ -282,64 +256,50 @@ app.delete('/agents/:username', requireAdmin, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// ── Voice endpoint — outbound calls ───────────────────────────
-// Twilio webhook validation enabled when ACCOUNT_SID is set
-app.post('/voice',
-  (req, res, next) => {
-    if (ACCOUNT_SID) return twilio.webhook({ protocol: 'https' })(req, res, next);
-    next();
-  },
-  async (req, res) => {
-    const twiml    = new twilio.twiml.VoiceResponse();
-    const to       = req.body.To || req.query.To;
-    const identity = (req.body.identity || req.query.identity || 'marcus_agent').trim();
+// ── Voice endpoint — outbound calls (no webhook validation) ──
+app.post('/voice', async (req, res) => {
+  const twiml    = new twilio.twiml.VoiceResponse();
+  const to       = req.body.To || req.query.To;
+  const identity = (req.body.identity || req.query.identity || 'marcus_agent').trim();
 
-    const agent = await agentByIdentity(identity);
-    const callerId = agent ? agent.number : '+18437735293';
+  const agent    = await agentByIdentity(identity);
+  const callerId = agent ? agent.number : '+18437735293';
 
-    if (to) {
-      const dial = twiml.dial({ callerId, answerOnBridge: true });
-      if (to.startsWith('client:')) {
-        dial.client({
-          statusCallbackEvent: ['initiated','ringing','answered','completed'],
-        }, to.replace('client:', ''));
-      } else {
-        dial.number(to);
-      }
+  if (to) {
+    const dial = twiml.dial({ callerId, answerOnBridge: true });
+    if (to.startsWith('client:')) {
+      dial.client({
+        statusCallbackEvent: ['initiated','ringing','answered','completed'],
+      }, to.replace('client:', ''));
     } else {
-      twiml.say('No destination number provided.');
-      twiml.hangup();
+      dial.number(to);
     }
-
-    res.type('text/xml');
-    res.send(twiml.toString());
+  } else {
+    twiml.say('No destination number provided.');
+    twiml.hangup();
   }
-);
 
-// ── Incoming call — routes to correct agent ───────────────────
-app.post('/incoming-call',
-  (req, res, next) => {
-    if (ACCOUNT_SID) return twilio.webhook({ protocol: 'https' })(req, res, next);
-    next();
-  },
-  async (req, res) => {
-    const twiml    = new twilio.twiml.VoiceResponse();
-    const to       = req.body.To || req.query.To || '';
-    const agent    = await agentByNumber(to);
-    const identity = agent ? agent.identity : 'marcus_agent';
-    const callerId = agent ? agent.number   : '+18437735293';
+  res.type('text/xml');
+  res.send(twiml.toString());
+});
 
-    const dial = twiml.dial({ answerOnBridge: true, callerId });
-    dial.client({
-      statusCallbackEvent: ['initiated','ringing','answered','completed'],
-    }, identity);
+// ── Incoming call — routes to correct agent (no webhook validation) ──
+app.post('/incoming-call', async (req, res) => {
+  const twiml    = new twilio.twiml.VoiceResponse();
+  const to       = req.body.To || req.query.To || '';
+  const agent    = await agentByNumber(to);
+  const identity = agent ? agent.identity : 'marcus_agent';
+  const callerId = agent ? agent.number   : '+18437735293';
 
-    res.type('text/xml');
-    res.send(twiml.toString());
-  }
-);
+  const dial = twiml.dial({ answerOnBridge: true, callerId });
+  dial.client({
+    statusCallbackEvent: ['initiated','ringing','answered','completed'],
+  }, identity);
 
-// ── Global error handler ──────────────────────────────────────
+  res.type('text/xml');
+  res.send(twiml.toString());
+});
+
 app.use((err, req, res, next) => {
   console.error('Unhandled error:', err);
   res.status(500).json({ error: 'Internal Server Error' });
