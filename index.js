@@ -346,4 +346,9 @@ app.use((err, req, res, next) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Evertrust Backend v3.0 running on port ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`Evertrust Backend v3.0 running on port ${PORT}`);
+  setInterval(() => {
+    require('https').get('https://evertrust-backend-1or5.onrender.com/').on('error', ()=>{});
+  }, 10 * 60 * 1000);
+});
