@@ -1,6 +1,6 @@
-const express = require('express');
-const cors    = require('cors');
-const twilio  = require('twilio');
+const express  = require('express');
+const cors     = require('cors');
+const twilio   = require('twilio');
 const mongoose = require('mongoose');
 const bcrypt   = require('bcryptjs');
 
@@ -9,13 +9,20 @@ app.use(cors());
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
+// ── Main (Marcus/Evertrust) Twilio credentials ──
 const ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
 const API_KEY     = process.env.TWILIO_API_KEY;
 const API_SECRET  = process.env.TWILIO_API_SECRET;
 
+// ── Sherrie subaccount credentials (from Render env vars) ──
+const SHERRIE_ACCOUNT_SID = process.env.SHERRIE_ACCOUNT_SID;
+const SHERRIE_API_KEY     = process.env.SHERRIE_API_KEY;
+const SHERRIE_API_SECRET  = process.env.SHERRIE_API_SECRET;
+
 const AccessToken = twilio.jwt.AccessToken;
 const VoiceGrant  = AccessToken.VoiceGrant;
 
+// ── MongoDB ──
 const MONGO_URI = process.env.MONGO_URI || '';
 let dbConnected = false;
 
@@ -25,6 +32,7 @@ if (MONGO_URI) {
     .catch(e  => console.error('MongoDB error:', e.message));
 }
 
+// ── Agent Schema ──
 const agentSchema = new mongoose.Schema({
   name:         { type: String, required: true },
   username:     { type: String, required: true, unique: true, lowercase: true, trim: true },
@@ -35,34 +43,45 @@ const agentSchema = new mongoose.Schema({
   twiml_app:    { type: String, default: '' },
   active:       { type: Boolean, default: true },
   created:      { type: Date, default: Date.now },
+  accountSid:   { type: String, default: '' },
+  apiKey:       { type: String, default: '' },
+  apiSecret:    { type: String, default: '' },
 });
 const Agent = mongoose.models.Agent || mongoose.model('Agent', agentSchema);
 
+// ── Fallback agents (no secrets hardcoded — all from env vars) ──
 const FALLBACK_AGENTS = [
   {
-    _id: 'marcus_fb',
-    name: 'Marcus Hayes',
-    username: 'marcus',
-    pin: '1234',
-    number: '+18437735293',
-    identity: 'marcus_agent',
+    _id:          'marcus_fb',
+    name:         'Marcus Hayes',
+    username:     'marcus',
+    pin:          '1234',
+    number:       '+18437735293',
+    identity:     'marcus_agent',
     token_server: 'https://evertrust-backend-1or5.onrender.com/token',
-    twiml_app: 'AP3a9c6ad4134e905e88daaa9369a2a705',
-    active: true,
+    twiml_app:    'AP3a9c6ad4134e905e88daaa9369a2a705',
+    active:       true,
+    accountSid:   '',
+    apiKey:       '',
+    apiSecret:    '',
   },
   {
-    _id: 'sherry_fb',
-    name: 'Sherrie Hayes',
-    username: 'sherrie',
-    pin: '5124',
-    number: '+18033038650',
-    identity: 'sherry_agent',
+    _id:          'sherry_fb',
+    name:         'Sherrie Hayes',
+    username:     'sherrie',
+    pin:          '5124',
+    number:       '+18033038650',
+    identity:     'sherry_agent',
     token_server: 'https://evertrust-backend-1or5.onrender.com/token',
-    twiml_app: 'APc2597f343780d26e24de777734153c1e',
-    active: true,
+    twiml_app:    'APc2597f343780d26e24de777734153c1e',
+    active:       true,
+    accountSid:   SHERRIE_ACCOUNT_SID || '',
+    apiKey:       SHERRIE_API_KEY     || '',
+    apiSecret:    SHERRIE_API_SECRET  || '',
   },
 ];
 
+// ── Agent lookup helpers ──
 async function agentByIdentity(identity) {
   if (dbConnected) {
     return await Agent.findOne({ identity, active: true }).lean();
@@ -74,9 +93,9 @@ async function agentByNumber(rawNumber) {
   const clean = rawNumber.replace(/\D/g, '');
   if (dbConnected) {
     const all = await Agent.find({ active: true }).lean();
-    return all.find(a => a.number.replace(/\D/g,'') === clean) || null;
+    return all.find(a => a.number.replace(/\D/g, '') === clean) || null;
   }
-  return FALLBACK_AGENTS.find(a => a.number.replace(/\D/g,'') === clean && a.active) || null;
+  return FALLBACK_AGENTS.find(a => a.number.replace(/\D/g, '') === clean && a.active) || null;
 }
 
 async function findAgent(username, pin) {
@@ -94,11 +113,12 @@ async function findAgent(username, pin) {
 async function getAllAgents() {
   if (dbConnected) {
     const agents = await Agent.find({}).sort({ created: -1 }).lean();
-    return agents.map(a => ({ ...a, pin: '••••' }));
+    return agents.map(a => ({ ...a, pin: '••••', apiSecret: '••••' }));
   }
-  return FALLBACK_AGENTS.map(a => ({ ...a, pin: '••••' }));
+  return FALLBACK_AGENTS.map(a => ({ ...a, pin: '••••', apiSecret: '••••' }));
 }
 
+// ── Admin middleware ──
 const ADMIN_SECRET = process.env.ADMIN_SECRET || 'agentsedge2025';
 function requireAdmin(req, res, next) {
   const s = req.headers['x-admin-secret'] || req.query.secret;
@@ -106,25 +126,41 @@ function requireAdmin(req, res, next) {
   next();
 }
 
+// ── Routes ──
 app.get('/', (req, res) => res.json({
   status:  'ok',
   service: 'Evertrust Dialer Backend',
   db:      dbConnected ? 'connected' : 'fallback',
-  version: '3.0.0',
+  version: '3.1.0',
 }));
 
 app.get('/health', (req, res) => res.status(200).json({ status: 'ok' }));
 
 // ── Token endpoint ──
+// Uses per-agent subaccount credentials if set, falls back to main account
 app.get('/token', async (req, res) => {
   const identity = (req.query.identity || 'marcus_agent').trim();
-  const agent = await agentByIdentity(identity);
+
+  let agent;
+  try {
+    agent = await agentByIdentity(identity);
+  } catch (e) {
+    return res.status(500).json({ error: 'Agent lookup failed' });
+  }
+
   if (!agent) {
     return res.status(403).json({ error: 'Unknown agent: ' + identity });
   }
+
+  // Use agent subaccount creds if available, else fall back to main account
+  const accountSid = (agent.accountSid && agent.accountSid.length > 5) ? agent.accountSid : ACCOUNT_SID;
+  const apiKey     = (agent.apiKey     && agent.apiKey.length     > 5) ? agent.apiKey     : API_KEY;
+  const apiSecret  = (agent.apiSecret  && agent.apiSecret.length  > 5) ? agent.apiSecret  : API_SECRET;
+
   try {
-    const token = new AccessToken(ACCOUNT_SID, API_KEY, API_SECRET, {
-      identity, ttl: 3600,
+    const token = new AccessToken(accountSid, apiKey, apiSecret, {
+      identity,
+      ttl: 3600,
     });
     const grant = new VoiceGrant({
       outgoingApplicationSid: agent.twiml_app,
@@ -132,16 +168,27 @@ app.get('/token', async (req, res) => {
     });
     token.addGrant(grant);
     res.json({ token: token.toJwt(), identity });
-  } catch(e) {
-    res.status(500).json({ error: 'Token generation failed' });
+  } catch (e) {
+    console.error('Token generation error for', identity, ':', e.message);
+    res.status(500).json({ error: 'Token generation failed: ' + e.message });
   }
 });
 
 // ── Voice endpoint — outbound calls ──
-app.post('/voice', (req, res) => {
+app.post('/voice', async (req, res) => {
   const twiml    = new twilio.twiml.VoiceResponse();
   const to       = req.body.To || req.query.To;
-  const callerId = req.body.callerId || req.query.callerId || '+18437735293';
+  const identity = req.body.identity || req.query.identity || 'marcus_agent';
+
+  let agent;
+  try {
+    agent = await agentByIdentity(identity);
+  } catch (e) {
+    agent = null;
+  }
+
+  // Use agent's own number as caller ID
+  const callerId = (agent && agent.number) ? agent.number : '+18437735293';
 
   if (to) {
     const dial = twiml.dial({ callerId, answerOnBridge: true });
@@ -154,12 +201,24 @@ app.post('/voice', (req, res) => {
   res.send(twiml.toString());
 });
 
-// ── Incoming call ──
-app.post('/incoming-call', (req, res) => {
-  const twiml    = new twilio.twiml.VoiceResponse();
-  const callerId = '+18437735293';
-  const dial     = twiml.dial({ answerOnBridge: true, callerId });
-  dial.client('marcus_agent');
+// ── Incoming call — routes to correct agent by their number ──
+app.post('/incoming-call', async (req, res) => {
+  const twiml = new twilio.twiml.VoiceResponse();
+  const to    = req.body.To || req.query.To || '';
+
+  let agent;
+  try {
+    agent = to ? await agentByNumber(to) : null;
+  } catch (e) {
+    agent = null;
+  }
+
+  const clientIdentity = agent ? agent.identity : 'marcus_agent';
+  const callerId       = agent ? agent.number   : '+18437735293';
+
+  const dial = twiml.dial({ answerOnBridge: true, callerId });
+  dial.client(clientIdentity);
+
   res.type('text/xml');
   res.send(twiml.toString());
 });
@@ -172,11 +231,14 @@ app.post('/auth', async (req, res) => {
     const agent = await findAgent(username, pin);
     if (!agent) return res.status(401).json({ error: 'Invalid credentials' });
     res.json({ success: true, agent: {
-      name: agent.name, username: agent.username,
-      number: agent.number, identity: agent.identity,
-      token_server: agent.token_server, twiml_app: agent.twiml_app,
+      name:         agent.name,
+      username:     agent.username,
+      number:       agent.number,
+      identity:     agent.identity,
+      token_server: agent.token_server,
+      twiml_app:    agent.twiml_app,
     }});
-  } catch(e) {
+  } catch (e) {
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -184,25 +246,25 @@ app.post('/auth', async (req, res) => {
 // ── Agents CRUD ──
 app.get('/agents', requireAdmin, async (req, res) => {
   try { res.json({ agents: await getAllAgents() }); }
-  catch(e) { res.status(500).json({ error: e.message }); }
+  catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post('/agents', requireAdmin, async (req, res) => {
-  const { name, username, pin, number, identity, token_server, twiml_app } = req.body;
+  const { name, username, pin, number, identity, token_server, twiml_app, accountSid, apiKey, apiSecret } = req.body;
   if (!name || !username || !pin) return res.status(400).json({ error: 'name, username, pin required' });
   try {
     if (dbConnected) {
       const exists = await Agent.findOne({ username: username.toLowerCase().trim() });
       if (exists) return res.status(409).json({ error: 'Username already exists' });
-      const agent = new Agent({ name, username, pin, number, identity, token_server, twiml_app, active: true });
+      const agent = new Agent({ name, username, pin, number, identity, token_server, twiml_app, accountSid, apiKey, apiSecret, active: true });
       await agent.save();
-      res.json({ success: true, agent: { ...agent.toObject(), pin: '••••' } });
+      res.json({ success: true, agent: { ...agent.toObject(), pin: '••••', apiSecret: '••••' } });
     } else {
-      const a = { _id: Date.now().toString(), name, username, pin, number, identity, token_server, twiml_app, active: true };
+      const a = { _id: Date.now().toString(), name, username, pin, number, identity, token_server, twiml_app, accountSid, apiKey, apiSecret, active: true };
       FALLBACK_AGENTS.push(a);
-      res.json({ success: true, agent: { ...a, pin: '••••' } });
+      res.json({ success: true, agent: { ...a, pin: '••••', apiSecret: '••••' } });
     }
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.patch('/agents/:username/toggle', requireAdmin, async (req, res) => {
@@ -219,7 +281,7 @@ app.patch('/agents/:username/toggle', requireAdmin, async (req, res) => {
       a.active = !a.active;
       res.json({ success: true, active: a.active });
     }
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.delete('/agents/:username', requireAdmin, async (req, res) => {
@@ -231,18 +293,20 @@ app.delete('/agents/:username', requireAdmin, async (req, res) => {
       if (idx !== -1) FALLBACK_AGENTS.splice(idx, 1);
     }
     res.json({ success: true });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── Global error handler ──
 app.use((err, req, res, next) => {
   console.error('Unhandled error:', err);
   res.status(500).json({ error: 'Internal Server Error' });
 });
 
+// ── Start server + keep-alive ping ──
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Evertrust Backend v3.0 running on port ${PORT}`);
+  console.log(`Evertrust Backend v3.1 running on port ${PORT}`);
   setInterval(() => {
-    require('https').get('https://evertrust-backend-1or5.onrender.com/').on('error', ()=>{});
+    require('https').get('https://evertrust-backend-1or5.onrender.com/').on('error', () => {});
   }, 10 * 60 * 1000);
 });
